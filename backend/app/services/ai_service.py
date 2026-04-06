@@ -42,7 +42,10 @@ async def _ollama_generate(prompt: str) -> str:
 
 
 async def _groq_generate(prompt: str) -> str:
-    messages = [{"role": "user", "content": prompt}]
+    messages = [
+        {"role": "system", "content": "You are a JSON extraction assistant. You MUST respond with valid JSON only. Never use null — use empty string \"\" for missing text and empty array [] for missing lists."},
+        {"role": "user", "content": prompt},
+    ]
     async with httpx.AsyncClient(timeout=60.0) as client:
         response = await client.post(
             GROQ_API_URL,
@@ -123,15 +126,35 @@ async def extract_cv_data(conversation: str) -> dict:
             text = await _ollama_generate(prompt)
 
         try:
-            return json.loads(text)
+            data = json.loads(text)
         except json.JSONDecodeError:
             start = text.find("{")
             end = text.rfind("}") + 1
             if start != -1 and end > start:
-                return json.loads(text[start:end])
-            return _fallback_cv_data()
-    except Exception:
+                data = json.loads(text[start:end])
+            else:
+                print(f"[extract_cv_data] Could not parse JSON from: {text[:200]}")
+                return _fallback_cv_data()
+
+        return _normalize_cv_data(data)
+    except Exception as e:
+        print(f"[extract_cv_data] Error: {type(e).__name__}: {e}")
         return _fallback_cv_data()
+
+
+def _normalize_cv_data(data: dict) -> dict:
+    """Replace None/null values with empty strings or empty lists."""
+    defaults = _fallback_cv_data()
+    result = {}
+    for key, default_val in defaults.items():
+        val = data.get(key)
+        if val is None:
+            result[key] = default_val
+        elif isinstance(default_val, list) and not isinstance(val, list):
+            result[key] = default_val
+        else:
+            result[key] = val
+    return result
 
 
 def _fallback_cv_data() -> dict:

@@ -1,29 +1,76 @@
 import httpx
 import json
-from ..config import OLLAMA_BASE_URL, OLLAMA_MODEL
+from ..config import OLLAMA_BASE_URL, OLLAMA_MODEL, AI_PROVIDER, GROQ_API_KEY, GROQ_MODEL
+
+GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
+
+
+async def _ollama_chat(messages: list) -> str:
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        response = await client.post(
+            f"{OLLAMA_BASE_URL}/api/chat",
+            json={"model": OLLAMA_MODEL, "messages": messages, "stream": False},
+        )
+        response.raise_for_status()
+        data = response.json()
+        return data.get("message", {}).get("content", "")
+
+
+async def _groq_chat(messages: list) -> str:
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        response = await client.post(
+            GROQ_API_URL,
+            headers={
+                "Authorization": f"Bearer {GROQ_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={"model": GROQ_MODEL, "messages": messages, "temperature": 0.7, "max_tokens": 2048},
+        )
+        response.raise_for_status()
+        data = response.json()
+        return data["choices"][0]["message"]["content"]
+
+
+async def _ollama_generate(prompt: str) -> str:
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        response = await client.post(
+            f"{OLLAMA_BASE_URL}/api/generate",
+            json={"model": OLLAMA_MODEL, "prompt": prompt, "stream": False, "format": "json"},
+        )
+        response.raise_for_status()
+        return response.json().get("response", "{}")
+
+
+async def _groq_generate(prompt: str) -> str:
+    messages = [{"role": "user", "content": prompt}]
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        response = await client.post(
+            GROQ_API_URL,
+            headers={
+                "Authorization": f"Bearer {GROQ_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={"model": GROQ_MODEL, "messages": messages, "temperature": 0.2, "max_tokens": 3000,
+                  "response_format": {"type": "json_object"}},
+        )
+        response.raise_for_status()
+        return response.json()["choices"][0]["message"]["content"]
 
 
 async def get_ai_response(messages: list) -> str:
-    """Send conversation to Ollama and return the assistant reply."""
+    """Send conversation to AI provider and return the assistant reply."""
     try:
-        async with httpx.AsyncClient(timeout=120.0) as client:
-            response = await client.post(
-                f"{OLLAMA_BASE_URL}/api/chat",
-                json={"model": OLLAMA_MODEL, "messages": messages, "stream": False},
-            )
-            response.raise_for_status()
-            data = response.json()
-            return data.get("message", {}).get(
-                "content",
-                "I apologize, but I couldn't generate a response. Please try again.",
-            )
+        if AI_PROVIDER == "groq":
+            text = await _groq_chat(messages)
+        else:
+            text = await _ollama_chat(messages)
+        return text or "I apologize, but I couldn't generate a response. Please try again."
     except httpx.ConnectError:
         return (
-            "⚠️ Could not connect to Ollama. Please make sure Ollama is running "
-            "(`ollama serve`) and the model is pulled (`ollama pull llama3`)."
+            "⚠️ Could not connect to the AI service. Please make sure it is running."
         )
     except Exception as e:
-        return f"⚠️ AI service error: {e}. Please ensure Ollama is running."
+        return f"⚠️ AI service error: {e}"
 
 
 async def extract_cv_data(conversation: str) -> dict:
@@ -70,28 +117,19 @@ async def extract_cv_data(conversation: str) -> dict:
     )
 
     try:
-        async with httpx.AsyncClient(timeout=120.0) as client:
-            response = await client.post(
-                f"{OLLAMA_BASE_URL}/api/generate",
-                json={
-                    "model": OLLAMA_MODEL,
-                    "prompt": prompt,
-                    "stream": False,
-                    "format": "json",
-                },
-            )
-            response.raise_for_status()
-            data = response.json()
-            text = data.get("response", "{}")
+        if AI_PROVIDER == "groq":
+            text = await _groq_generate(prompt)
+        else:
+            text = await _ollama_generate(prompt)
 
-            try:
-                return json.loads(text)
-            except json.JSONDecodeError:
-                start = text.find("{")
-                end = text.rfind("}") + 1
-                if start != -1 and end > start:
-                    return json.loads(text[start:end])
-                return _fallback_cv_data()
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            start = text.find("{")
+            end = text.rfind("}") + 1
+            if start != -1 and end > start:
+                return json.loads(text[start:end])
+            return _fallback_cv_data()
     except Exception:
         return _fallback_cv_data()
 
